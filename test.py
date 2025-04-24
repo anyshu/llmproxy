@@ -10,7 +10,7 @@ load_dotenv()
 
 # Create AsyncOpenAI client
 client = AsyncOpenAI(
-    base_url="http://localhost:3000/v1",
+    base_url="http://localhost:13000/v1",
     api_key=os.getenv('OPENAI_API_KEY'),  # Use the actual API key from environment
     timeout=60.0
 )
@@ -87,7 +87,7 @@ async def main():
     print("Please ensure:")
     print("1. The proxy server (proxy_server.py) is running")
     print("2. The .env file contains valid OPENAI_API_KEY and OPENAI_API_BASE_URL")
-    print("3. The proxy server port (default: 3000) is correct")
+    print("3. The proxy server port (default: 13000) is correct")
     
     # Run regular chat completion test
     chat_success = await test_with_retry(test_chat_completion)

@@ -9,9 +9,24 @@ import json
 import logging
 from datetime import datetime
 from typing import AsyncGenerator, Optional
+from collections import defaultdict
+import time
 
 # 加载环境变量
 load_dotenv()
+
+# 请求计数器
+request_counter = defaultdict(lambda: {"count": 0, "timestamp": 0})
+
+# 清理过期的请求计数
+def cleanup_request_counter():
+    current_time = time.time()
+    expired_requests = []
+    for key, value in request_counter.items():
+        if current_time - value["timestamp"] > 60:  # 60秒后清理
+            expired_requests.append(key)
+    for key in expired_requests:
+        del request_counter[key]
 
 # 自定义日志处理器
 class JSONFormatter(logging.Formatter):
@@ -71,11 +86,45 @@ client = openai.AsyncOpenAI(
 
 @app.middleware("http")
 async def proxy_middleware(request: Request, call_next):
+    # 打印请求信息到控制台
+    print(f"\n{'='*50}")
+    print(f"收到请求: {request.method} {request.url.path}")
+    print(f"客户端IP: {request.client.host}")
+    print(f"请求时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    # 只处理 OpenAI API 相关的请求
+    if not any(request.url.path.strip('/').startswith(prefix) for prefix in ['v1/', 'chat/', 'completions', 'embeddings', 'models']):
+        print(f"非 API 请求，转发给下一个处理器")
+        return await call_next(request)
+
+    # 生成请求唯一标识
+    request_id = f"{request.client.host}:{request.url.path}:{int(time.time())}"
+    print(f"请求ID: {request_id}")
+    
+    # 更新请求计数
+    request_counter[request_id]["count"] += 1
+    request_counter[request_id]["timestamp"] = time.time()
+    
+    # 清理过期的请求计数
+    if len(request_counter) > 1000:  # 防止内存泄漏
+        cleanup_request_counter()
+    
+    # 检查是否重复请求
+    if request_counter[request_id]["count"] > 1:
+        logger.warning({
+            "message": f"检测到重复请求",
+            "request_id": request_id,
+            "count": request_counter[request_id]["count"]
+        })
+        return JSONResponse(
+            content={"error": "重复请求"},
+            status_code=429
+        )
+
     try:
         # 读取请求内容
         body = await request.body()
         body_str = body.decode() if body else ""
-        print(body_str)
         body_json = json.loads(body_str) if body_str else {}
         
         # 获取请求路径
@@ -92,20 +141,26 @@ async def proxy_middleware(request: Request, call_next):
             "method": request.method,
             "url": str(request.url),
             "headers": dict(request.headers),
-            "body": body_json if body_json else body_str
+            "body": body_json if body_json else body_str,
+            "request_id": request_id
         }
         
         # 根据不同的 API 端点调用相应的 OpenAI 方法
         try:
             if path == 'chat/completions':
+                print(f"处理 chat/completions 请求")
                 response = await client.chat.completions.create(**body_json)
             elif path == 'completions':
+                print(f"处理 completions 请求")
                 response = await client.completions.create(**body_json)
             elif path == 'embeddings':
+                print(f"处理 embeddings 请求")
                 response = await client.embeddings.create(**body_json)
             elif path == 'models':
+                print(f"处理 models 请求")
                 response = await client.models.list()
             else:
+                print(f"未支持的 API 端点: {path}")
                 error_response = {"error": f"未支持的 API 端点: {path}"}
                 log_data["response"] = {"status_code": 400, "body": error_response}
                 logger.info(log_data)
@@ -113,16 +168,27 @@ async def proxy_middleware(request: Request, call_next):
             
             # 处理流式响应
             if body_json.get('stream', False):
+                print("开始处理流式响应")
                 async def generate() -> AsyncGenerator[str, None]:
                     try:
+                        chunk_count = 0
                         async for chunk in response:
+                            chunk_count += 1
+                            if chunk_count % 10 == 0:  # 每10个chunk打印一次
+                                print(f"已发送 {chunk_count} 个响应块")
                             yield f"data: {json.dumps(chunk.dict())}\n\n"
+                        print(f"流式响应完成，总共发送 {chunk_count} 个响应块")
                         yield "data: [DONE]\n\n"
                     except Exception as e:
+                        print(f"流式响应出错: {str(e)}")
                         error_msg = {"error": str(e)}
                         log_data["response"] = {"status_code": 500, "body": error_msg}
                         logger.info(log_data)
                         yield f"data: {json.dumps(error_msg)}\n\n"
+                    finally:
+                        print(f"请求处理完成: {request_id}")
+                        if request_id in request_counter:
+                            del request_counter[request_id]
                 
                 log_data["response"] = {"status_code": 200, "body": "Stream response"}
                 logger.info(log_data)
@@ -132,31 +198,41 @@ async def proxy_middleware(request: Request, call_next):
                 )
             else:
                 response_dict = response.dict()
+                print(f"请求处理完成: {request_id}")
                 log_data["response"] = {"status_code": 200, "body": response_dict}
                 logger.info(log_data)
+                if request_id in request_counter:
+                    del request_counter[request_id]
                 return JSONResponse(
                     content=response_dict,
                     status_code=200
                 )
                     
         except Exception as e:
-            error_msg = {"error": str(e),"proxy": "proxy server error"}
+            print(f"请求处理出错: {str(e)}")
+            error_msg = {"error": str(e)}
             log_data["response"] = {"status_code": 500, "body": error_msg}
             logger.info(log_data)
+            if request_id in request_counter:
+                del request_counter[request_id]
             return JSONResponse(
                 content=error_msg,
                 status_code=500
             )
             
     except Exception as e:
+        print(f"请求处理出错: {str(e)}")
         error_msg = {"error": str(e)}
         logger.error({
             "client_ip": request.client.host,
             "method": request.method,
             "url": str(request.url),
             "error": str(e),
-            "response": {"status_code": 500, "body": error_msg}
+            "response": {"status_code": 500, "body": error_msg},
+            "request_id": request_id
         })
+        if request_id in request_counter:
+            del request_counter[request_id]
         return JSONResponse(
             content=error_msg,
             status_code=500
