@@ -239,11 +239,38 @@ async def proxy_middleware(request: Request, call_next):
         )
 
 if __name__ == "__main__":
+    import multiprocessing
+
+    # 获取 CPU 核心数
+    workers_count = multiprocessing.cpu_count()
+    
+    # 使用 CPU 核心数作为工作进程数（保留至少一个核心给系统）
+    workers = max(2, workers_count - 1)
+    
     logger.info({
-        "message": f"代理服务器启动于端口 {PROXY_PORT}",
+        "message": f"代理服务器启动于端口 {PROXY_PORT}，工作进程数：{workers}",
         "client_ip": "system",
         "method": "START",
         "url": f"http://0.0.0.0:{PROXY_PORT}",
+        "workers": workers,
         "response": {"status_code": 200, "body": "Server started"}
     })
-    uvicorn.run(app, host="0.0.0.0", port=PROXY_PORT)
+    
+    # 使用新的启动方式
+    if workers > 1:
+        # 使用多进程模式时，需要使用字符串形式的导入路径
+        uvicorn.run(
+            "proxy_server:app",  # 使用模块路径字符串
+            host="0.0.0.0", 
+            port=PROXY_PORT,
+            workers=workers,
+            loop="auto"
+        )
+    else:
+        # 单进程模式下可以直接传递应用实例
+        uvicorn.run(
+            app,
+            host="0.0.0.0", 
+            port=PROXY_PORT,
+            loop="auto"
+        )
