@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import AsyncGenerator, Optional
 from collections import defaultdict
 import time
+import socket
 
 # 加载环境变量
 load_dotenv()
@@ -238,6 +239,22 @@ async def proxy_middleware(request: Request, call_next):
             status_code=500
         )
 
+# 获取本机IP地址
+def get_host_ip():
+    try:
+        # 创建一个临时连接来获取本机IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # 不需要真正连接到谷歌，只需使用地址
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return '127.0.0.1'
+
+# 获取主机IP
+host_ip = get_host_ip()
+
 if __name__ == "__main__":
     import multiprocessing
 
@@ -250,18 +267,26 @@ if __name__ == "__main__":
     logger.info({
         "message": f"代理服务器启动于端口 {PROXY_PORT}，工作进程数：{workers}",
         "client_ip": "system",
-        "method": "START",
+        "method": "START", 
         "url": f"http://0.0.0.0:{PROXY_PORT}",
+        "host_ip": host_ip,
         "workers": workers,
         "response": {"status_code": 200, "body": "Server started"}
     })
+    
+    print(f"{'='*50}")
+    print(f"代理服务器启动成功!")
+    print(f"本地访问地址: http://localhost:{PROXY_PORT}")
+    print(f"网络访问地址: http://{host_ip}:{PROXY_PORT}")
+    print(f"请确保防火墙允许此端口的访问")
+    print(f"{'='*50}")
     
     # 使用新的启动方式
     if workers > 1:
         # 使用多进程模式时，需要使用字符串形式的导入路径
         uvicorn.run(
             "proxy_server:app",  # 使用模块路径字符串
-            host="0.0.0.0", 
+            host="0.0.0.0",  # 绑定到所有网络接口
             port=PROXY_PORT,
             workers=workers,
             loop="auto"
@@ -270,7 +295,7 @@ if __name__ == "__main__":
         # 单进程模式下可以直接传递应用实例
         uvicorn.run(
             app,
-            host="0.0.0.0", 
+            host="0.0.0.0",  # 绑定到所有网络接口
             port=PROXY_PORT,
             loop="auto"
         )
